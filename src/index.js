@@ -184,16 +184,40 @@ async function handleRequest(request) {
       const registryType = prefix.split('/')[2];
       console.log(`Handling registry request: ${registryType}`);
 
-      // 构建目标 URL
-      const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
-      console.log(`Target URL: ${targetUrl}`);
+      // 创建请求头
+      const headers = new Headers();
+      
+      // 转发必要的头
+      ['accept', 'content-type', 'authorization', 'user-agent'].forEach(key => {
+        if (request.headers.has(key.toLowerCase())) {
+          headers.set(key, request.headers.get(key.toLowerCase()));
+        }
+      });
 
       // 特殊处理 Docker Hub
       if (registryType === 'docker/hub') {
         // Docker Hub 需要特殊处理
-        const dockerHubUrl = `https://registry-1.docker.io${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+        // 1. 处理认证
+        const authorization = request.headers.get('authorization');
+        if (authorization) {
+          headers.set('authorization', authorization);
+        }
+
+        // 2. 处理路径
+        // Docker Hub 需要添加 /v2/ 前缀
+        let dockerHubPath = rest;
+        if (!dockerHubPath.startsWith('/v2/')) {
+          dockerHubPath = `/v2/${dockerHubPath}`;
+        }
+
+        const dockerHubUrl = `https://registry-1.docker.io${dockerHubPath}${search}`;
         console.log(`Docker Hub request: ${dockerHubUrl}`);
         
+        // 3. 添加必要的头
+        headers.set('Accept', 'application/vnd.docker.distribution.manifest.v2+json');
+        headers.set('Accept', 'application/vnd.docker.distribution.manifest.list.v2+json');
+        headers.set('Accept', 'application/vnd.docker.distribution.manifest.v1+json');
+
         // 发起请求
         const response = await fetch(dockerHubUrl, {
           method: request.method,
@@ -215,6 +239,10 @@ async function handleRequest(request) {
       }
 
       // 其他 registry 直接转发
+      const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+      console.log(`Target URL: ${targetUrl}`);
+
+      // 发起请求
       const response = await fetch(targetUrl, {
         method: request.method,
         headers: headers,
