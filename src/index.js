@@ -167,13 +167,77 @@ async function handleRequest(request) {
     return new Response('Not Found', { status: 404 });
   }
 
-  // 构建目标 URL，包含原始的查询参数
-  const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
-  console.log(`Target URL: ${targetUrl}`);
-
   try {
-    // 准备转发的请求头
+    // 创建请求头
     const headers = new Headers();
+    
+    // 转发必要的头
+    ['accept', 'content-type', 'authorization', 'user-agent'].forEach(key => {
+      if (request.headers.has(key.toLowerCase())) {
+        headers.set(key, request.headers.get(key.toLowerCase()));
+      }
+    });
+
+    // 如果是 registry 请求，特殊处理
+    if (prefix.startsWith('/registry/')) {
+      // 获取 registry 类型
+      const registryType = prefix.split('/')[2];
+      console.log(`Handling registry request: ${registryType}`);
+
+      // 构建目标 URL
+      const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+      console.log(`Target URL: ${targetUrl}`);
+
+      // 特殊处理 Docker Hub
+      if (registryType === 'docker/hub') {
+        // Docker Hub 需要特殊处理
+        const dockerHubUrl = `https://registry-1.docker.io${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+        console.log(`Docker Hub request: ${dockerHubUrl}`);
+        
+        // 发起请求
+        const response = await fetch(dockerHubUrl, {
+          method: request.method,
+          headers: headers,
+          body: request.body
+        });
+
+        // 创建响应
+        const responseHeaders = new Headers(response.headers);
+        responseHeaders.set('X-Content-Type-Options', 'nosniff');
+        responseHeaders.set('X-Frame-Options', 'DENY');
+        responseHeaders.set('Referrer-Policy', 'no-referrer');
+
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeaders
+        });
+      }
+
+      // 其他 registry 直接转发
+      const response = await fetch(targetUrl, {
+        method: request.method,
+        headers: headers,
+        body: request.body
+      });
+
+      // 创建响应
+      const responseHeaders = new Headers(response.headers);
+      responseHeaders.set('X-Content-Type-Options', 'nosniff');
+      responseHeaders.set('X-Frame-Options', 'DENY');
+      responseHeaders.set('Referrer-Policy', 'no-referrer');
+
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders
+      });
+    }
+
+    // 非 registry 请求，使用通用处理逻辑
+    const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+    console.log(`Target URL: ${targetUrl}`);
+
     // 获取当前 API 的允许头配置
     const config = apiMapping[prefix];
     const allowedHeaders = config.allowedHeaders || [];
@@ -187,11 +251,6 @@ async function handleRequest(request) {
       }
     }
 
-    if (request.headers.has('user-agent')) {
-      headers.set('User-Agent', request.headers.get('user-agent'));
-      console.log(`Forwarding User-Agent: ${request.headers.get('user-agent')}`);
-    }
-
     console.log(`Forwarding request to: ${targetUrl}`);
 
     // 发起实际的 fetch 请求到目标 API
@@ -201,9 +260,7 @@ async function handleRequest(request) {
       body: request.body
     });
 
-    console.log(`Received response status from ${targetUrl}: ${response.status}`);
-
-    // 创建新的响应头，并添加安全相关的头
+    // 创建响应
     const responseHeaders = new Headers(response.headers);
     responseHeaders.set('X-Content-Type-Options', 'nosniff');
     responseHeaders.set('X-Frame-Options', 'DENY');
