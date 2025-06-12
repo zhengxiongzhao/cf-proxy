@@ -77,7 +77,7 @@ const registryApis = {
       baseUrl: 'https://docker.elastic.co'
     },
     'docker/hub': {
-      baseUrl: 'https://docker.io'
+      baseUrl: 'https://registry-1.docker.io'
     },
     google: {
       baseUrl: 'https://gcr.io'
@@ -200,64 +200,30 @@ async function handleRequest(request) {
         const isDockerHub = true;
         const authorization = request.headers.get('authorization');
 
-        // 处理 /v2/ 路径
-        if (rest === '/v2/') {
-          const newUrl = new URL('https://registry-1.docker.io/v2/');
-          if (authorization) {
-            headers.set("Authorization", authorization);
-          }
-          const resp = await fetch(newUrl.toString(), {
-            method: "GET",
-            headers: headers,
-            redirect: "follow"
-          });
-          if (resp.status === 401) {
-            return responseUnauthorized(url);
-          }
-          return resp;
+        // 确保路径以 /v2/ 开头
+        let dockerHubPath = rest;
+        if (!dockerHubPath.startsWith('/v2/')) {
+          dockerHubPath = `/v2/${dockerHubPath}`;
         }
 
         // 处理认证
-        if (rest === '/v2/auth') {
-          const newUrl = new URL('https://registry-1.docker.io/v2/');
-          const resp = await fetch(newUrl.toString(), {
-            method: "GET",
-            redirect: "follow"
-          });
-          if (resp.status !== 401) {
-            return resp;
-          }
-          const authenticateStr = resp.headers.get("WWW-Authenticate");
-          if (authenticateStr === null) {
-            return resp;
-          }
-          const wwwAuthenticate = parseAuthenticate(authenticateStr);
-          let scope = url.searchParams.get("scope");
-          
-          // 处理 DockerHub library 镜像
-          if (scope && isDockerHub) {
-            let scopeParts = scope.split(":");
-            if (scopeParts.length == 3 && !scopeParts[1].includes("/")) {
-              scopeParts[1] = "library/" + scopeParts[1];
-              scope = scopeParts.join(":");
-            }
-          }
-          return await fetchToken(wwwAuthenticate, scope, authorization);
+        if (authorization) {
+          headers.set("Authorization", authorization);
         }
 
-        // 处理 DockerHub library 镜像路径
+        // 处理 DockerHub library 镜像
         if (isDockerHub) {
-          const pathParts = rest.split("/");
-          if (pathParts.length == 5) {
-            pathParts.splice(2, 0, "library");
-            const redirectUrl = new URL(url);
-            redirectUrl.pathname = pathParts.join("/");
-            return Response.redirect(redirectUrl, 301);
+          const pathParts = dockerHubPath.split("/");
+          if (pathParts.length == 6) {  // v2/ + 5个部分
+            if (!pathParts[3].includes("/")) {
+              pathParts.splice(3, 0, "library");
+              dockerHubPath = pathParts.join("/");
+            }
           }
         }
 
         // 构建目标 URL
-        const targetUrl = `https://registry-1.docker.io${rest}${search}`;
+        const targetUrl = `https://registry-1.docker.io${dockerHubPath}${search}`;
         console.log(`Docker Hub request: ${targetUrl}`);
 
         // 发起请求
@@ -281,12 +247,6 @@ async function handleRequest(request) {
           });
           return redirectResp;
         }
-
-        // 创建响应
-        const responseHeaders = new Headers(resp.headers);
-        responseHeaders.set('X-Content-Type-Options', 'nosniff');
-        responseHeaders.set('X-Frame-Options', 'DENY');
-        responseHeaders.set('Referrer-Policy', 'no-referrer');
 
         return new Response(resp.body, {
           status: resp.status,
