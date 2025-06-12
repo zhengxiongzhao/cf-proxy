@@ -160,14 +160,20 @@ async function handleRequest(request) {
   const [prefix, rest] = extractPrefixAndRest(pathname, Object.keys(apiMapping));
   console.log(`Extracted prefix: ${prefix}, rest: ${rest}`);
 
-  // 如果找不到匹配的前缀，返回 404
+  // 如果没有匹配的前缀，返回 404
   if (!prefix) {
-    console.log(`No matching prefix found for path: ${pathname}`);
-    console.log('Available prefixes:', Object.keys(apiMapping));
-    return new Response('Not Found', { status: 404 });
+    return new Response(JSON.stringify({ error: 'Not Found' }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 
-  try {
+  // 如果是 registry 请求，特殊处理
+  if (prefix.startsWith('/registry/')) {
+    // 获取 registry 类型
+    const registryType = prefix.split('/')[2];
+    console.log(`Handling registry request: ${registryType}`);
+
     // 创建请求头
     const headers = new Headers();
     
@@ -178,61 +184,58 @@ async function handleRequest(request) {
       }
     });
 
-    // 如果是 registry 请求，特殊处理
-    if (prefix.startsWith('/registry/')) {
-      // 获取 registry 类型
-      const registryType = prefix.split('/')[2];
-      console.log(`Handling registry request: ${registryType}`);
+    // 特殊处理 Docker Hub
+    if (registryType === 'docker/hub') {
+      // Docker Hub 需要特殊处理
+      const isDockerHub = true;
+      const authorization = request.headers.get('authorization');
 
-      // 创建请求头
-      const headers = new Headers();
-      
-      // 转发必要的头
-      ['accept', 'content-type', 'authorization', 'user-agent'].forEach(key => {
-        if (request.headers.has(key.toLowerCase())) {
-          headers.set(key, request.headers.get(key.toLowerCase()));
-        }
-      });
+      // 确保路径以 /v2/ 开头
+      let dockerHubPath = rest;
+      if (!dockerHubPath.startsWith('/v2/')) {
+        dockerHubPath = `/v2/${dockerHubPath}`;
+      }
 
-      // 特殊处理 Docker Hub
-      if (registryType === 'docker/hub') {
-        // Docker Hub 需要特殊处理
-        const isDockerHub = true;
-        const authorization = request.headers.get('authorization');
-
-        // 确保路径以 /v2/ 开头
-        let dockerHubPath = rest;
-        if (!dockerHubPath.startsWith('/v2/')) {
-          dockerHubPath = `/v2/${dockerHubPath}`;
-        }
-
-        // 处理认证
-        if (authorization) {
-          headers.set("Authorization", authorization);
-        }
-
-        // 处理 DockerHub library 镜像
-        if (isDockerHub) {
-          const pathParts = dockerHubPath.split("/");
-          if (pathParts.length == 6) {  // v2/ + 5个部分
-            if (!pathParts[3].includes("/")) {
-              pathParts.splice(3, 0, "library");
-              dockerHubPath = pathParts.join("/");
-            }
+      // 处理 DockerHub library 镜像
+      if (isDockerHub) {
+        const pathParts = dockerHubPath.split("/");
+        if (pathParts.length == 6) {  // v2/ + 5个部分
+          if (!pathParts[3].includes("/")) {
+            pathParts.splice(3, 0, "library");
+            dockerHubPath = pathParts.join("/");
           }
         }
+      }
 
-        // 构建目标 URL
-        const targetUrl = `https://registry-1.docker.io${dockerHubPath}${search}`;
-        console.log(`Docker Hub request: ${targetUrl}`);
+      // 添加必要的 Accept 头
+      headers.set('Accept', 'application/vnd.docker.distribution.manifest.v2+json');
+      headers.set('Accept', 'application/vnd.docker.distribution.manifest.list.v2+json');
+      headers.set('Accept', 'application/vnd.docker.distribution.manifest.v1+json');
 
-        // 发起请求
-        const newReq = new Request(targetUrl, {
-          method: request.method,
-          headers: headers,
-          redirect: "manual"
-        });
+      // 如果有认证信息
+      if (authorization) {
+        headers.set('Authorization', authorization);
+      }
 
+      // 构建目标 URL
+      const targetUrl = `https://registry-1.docker.io${dockerHubPath}${search}`;
+      console.log(`Docker Hub request: ${targetUrl}`);
+
+      // 处理请求体
+      let body;
+      if (request.body) {
+        body = await request.clone().text();
+      }
+
+      // 发起请求
+      const newReq = new Request(targetUrl, {
+        method: request.method,
+        headers: headers,
+        body: body,
+        redirect: "manual"
+      });
+
+      try {
         const resp = await fetch(newReq);
         if (resp.status == 401) {
           return responseUnauthorized(url);
@@ -248,41 +251,34 @@ async function handleRequest(request) {
           return redirectResp;
         }
 
+        // 创建响应
+        const responseHeaders = new Headers();
+        // 保留所有原始响应头
+        for (const [key, value] of resp.headers.entries()) {
+          responseHeaders.set(key, value);
+        }
+
+        // 添加必要的安全头
+        responseHeaders.set('X-Content-Type-Options', 'nosniff');
+        responseHeaders.set('X-Frame-Options', 'DENY');
+        responseHeaders.set('Referrer-Policy', 'no-referrer');
+
         return new Response(resp.body, {
           status: resp.status,
           statusText: resp.statusText,
           headers: responseHeaders
         });
+      } catch (error) {
+        console.error(`Failed to fetch Docker Hub request:`, error);
+        return new Response('Internal Server Error', { status: 500 });
       }
-
-      // 其他 registry 直接转发
-      const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
-      console.log(`Target URL: ${targetUrl}`);
-
-      // 发起请求
-      const response = await fetch(targetUrl, {
-        method: request.method,
-        headers: headers,
-        body: request.body
-      });
-
-      // 创建响应
-      const responseHeaders = new Headers(response.headers);
-      responseHeaders.set('X-Content-Type-Options', 'nosniff');
-      responseHeaders.set('X-Frame-Options', 'DENY');
-      responseHeaders.set('Referrer-Policy', 'no-referrer');
-
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders
-      });
     }
 
-    // 非 registry 请求，使用通用处理逻辑
+    // 其他 registry 直接转发
     const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
     console.log(`Target URL: ${targetUrl}`);
 
+    // 发起请求
     // 获取当前 API 的允许头配置
     const config = apiMapping[prefix];
     const allowedHeaders = config.allowedHeaders || [];
