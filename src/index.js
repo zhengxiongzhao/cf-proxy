@@ -1,176 +1,235 @@
-addEventListener("fetch", (event) => {
-  event.passThroughOnException();
+// 配置
+const DEFAULT_HEADERS = ['accept', 'content-type', 'authorization'];
+
+// API 配置类型定义
+/**
+ * @typedef {Object} ApiConfig
+ * @property {string} baseUrl - API 的基础 URL
+ * @property {string[]} [allowedHeaders] - 允许转发的请求头
+ */
+
+/**
+ * @typedef {Object} ApiGroup
+ * @property {string} prefix - API 组的前缀
+ * @property {ApiConfig} config - API 配置对象
+ */
+
+// AI API 配置
+const aiApis = {
+  prefix: '/ai',
+  config: {
+    discord: {
+      baseUrl: 'https://discord.com/api'
+    },
+    telegram: {
+      baseUrl: 'https://api.telegram.org'
+    },
+    openai: {
+      baseUrl: 'https://api.openai.com'
+    },
+    claude: {
+      baseUrl: 'https://api.anthropic.com',
+      allowedHeaders: ['anthropic-version']
+    },
+    gemini: {
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      allowedHeaders: ['x-goog-api-key']
+    },
+    meta: {
+      baseUrl: 'https://www.meta.ai/api'
+    },
+    groq: {
+      baseUrl: 'https://api.groq.com/openai'
+    },
+    xai: {
+      baseUrl: 'https://api.x.ai',
+      allowedHeaders: ['x-api-key']
+    },
+    cohere: {
+      baseUrl: 'https://api.cohere.ai'
+    },
+    huggingface: {
+      baseUrl: 'https://api.huggingface.co'
+    },
+    together: {
+      baseUrl: 'https://api.together.ai'
+    },
+    novita: {
+      baseUrl: 'https://api.novita.ai'
+    },
+    portkey: {
+      baseUrl: 'https://api.portkey.ai'
+    },
+    fireworks: {
+      baseUrl: 'https://api.fireworks.ai'
+    },
+    openrouter: {
+      baseUrl: 'https://openrouter.ai/api'
+    }
+  }
+};
+
+// Docker/K8s Registry 配置
+const registryApis = {
+  prefix: '/registry',
+  config: {
+    'docker/elastic': {
+      baseUrl: 'https://docker.elastic.co'
+    },
+    'docker/hub': {
+      baseUrl: 'https://docker.io'
+    },
+    google: {
+      baseUrl: 'https://gcr.io'
+    },
+    github: {
+      baseUrl: 'https://ghcr.io'
+    },
+    k8s: {
+      baseUrl: 'https://registry.k8s.io'
+    },
+    microsoft: {
+      baseUrl: 'https://mcr.microsoft.com'
+    },
+    nvidia: {
+      baseUrl: 'https://nvcr.io'
+    },
+    quay: {
+      baseUrl: 'https://quay.io'
+    },
+    ollama: {
+      baseUrl: 'https://registry.ollama.ai'
+    }
+  }
+};
+
+// 合并所有配置
+const mergeConfigs = (apiGroups) => {
+  const config = {};
+  for (const group of apiGroups) {
+    for (const [key, configItem] of Object.entries(group.config)) {
+      config[`${group.prefix}/${key}`] = configItem;
+    }
+  }
+  return config;
+};
+
+// 生成最终配置
+const allConfig = mergeConfigs([aiApis, registryApis]);
+
+// 使用 allConfig 作为 apiMapping
+const apiMapping = allConfig;
+
+// 在处理请求时，将默认头和特定头合并
+function getHeadersForApi(prefix) {
+  const config = apiMapping[prefix];
+  if (!config.allowedHeaders) {
+    return DEFAULT_HEADERS;
+  }
+  return [...DEFAULT_HEADERS, ...config.allowedHeaders];
+}
+
+addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
 
-const dockerHub = "https://registry-1.docker.io";
-
-const routes = {
-  // production
-  ["docker." + CUSTOM_DOMAIN]: dockerHub,
-  ["quay." + CUSTOM_DOMAIN]: "https://quay.io",
-  ["gcr." + CUSTOM_DOMAIN]: "https://gcr.io",
-  ["k8s-gcr." + CUSTOM_DOMAIN]: "https://k8s.gcr.io",
-  ["k8s." + CUSTOM_DOMAIN]: "https://registry.k8s.io",
-  ["ghcr." + CUSTOM_DOMAIN]: "https://ghcr.io",
-  ["cloudsmith." + CUSTOM_DOMAIN]: "https://docker.cloudsmith.io",
-  ["ecr." + CUSTOM_DOMAIN]: "https://public.ecr.aws",
-
-  // staging
-  ["docker-staging." + CUSTOM_DOMAIN]: dockerHub,
-};
-
-function routeByHosts(host) {
-  if (host in routes) {
-    return routes[host];
-  }
-  if (MODE == "debug") {
-    return TARGET_UPSTREAM;
-  }
-  return "";
-}
-
 async function handleRequest(request) {
   const url = new URL(request.url);
-  if (url.pathname == "/") {
-    return Response.redirect(url.protocol + "//" + url.host + "/v2/", 301);
+  const pathname = url.pathname;
+  const search = url.search;
+
+  console.log(`Received request: ${request.method} ${pathname}${search}`);
+
+  // 处理根路径和 index.html
+  if (pathname === '/' || pathname === '/index.html') {
+    return new Response('Service is running!', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' }
+    });
   }
-  const upstream = routeByHosts(url.hostname);
-  if (upstream === "") {
-    return new Response(
-      JSON.stringify({
-        routes: routes,
-      }),
-      {
-        status: 404,
-      }
-    );
+
+  // 处理 robots.txt
+  if (pathname === '/robots.txt') {
+    return new Response('User-agent: *\nDisallow: /', {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+    });
   }
-  const isDockerHub = upstream == dockerHub;
-  const authorization = request.headers.get("Authorization");
-  if (url.pathname == "/v2/") {
-    const newUrl = new URL(upstream + "/v2/");
+
+  // 提取 API 前缀和剩余路径
+  const [prefix, rest] = extractPrefixAndRest(pathname, Object.keys(apiMapping));
+  console.log(`Extracted prefix: ${prefix}, rest: ${rest}`);
+
+  // 如果找不到匹配的前缀，返回 404
+  if (!prefix) {
+    console.log(`No matching prefix found for path: ${pathname}`);
+    console.log('Available prefixes:', Object.keys(apiMapping));
+    return new Response('Not Found', { status: 404 });
+  }
+
+  // 构建目标 URL，包含原始的查询参数
+  const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+  console.log(`Target URL: ${targetUrl}`);
+
+  try {
+    // 准备转发的请求头
     const headers = new Headers();
-    if (authorization) {
-      headers.set("Authorization", authorization);
-    }
-    // check if need to authenticate
-    const resp = await fetch(newUrl.toString(), {
-      method: "GET",
-      headers: headers,
-      redirect: "follow",
-    });
-    if (resp.status === 401) {
-      return responseUnauthorized(url);
-    }
-    return resp;
-  }
-  // get token
-  if (url.pathname == "/v2/auth") {
-    const newUrl = new URL(upstream + "/v2/");
-    const resp = await fetch(newUrl.toString(), {
-      method: "GET",
-      redirect: "follow",
-    });
-    if (resp.status !== 401) {
-      return resp;
-    }
-    const authenticateStr = resp.headers.get("WWW-Authenticate");
-    if (authenticateStr === null) {
-      return resp;
-    }
-    const wwwAuthenticate = parseAuthenticate(authenticateStr);
-    let scope = url.searchParams.get("scope");
-    // autocomplete repo part into scope for DockerHub library images
-    // Example: repository:busybox:pull => repository:library/busybox:pull
-    if (scope && isDockerHub) {
-      let scopeParts = scope.split(":");
-      if (scopeParts.length == 3 && !scopeParts[1].includes("/")) {
-        scopeParts[1] = "library/" + scopeParts[1];
-        scope = scopeParts.join(":");
+    // 获取当前 API 的允许头配置
+    const config = apiMapping[prefix];
+    const allowedHeaders = config.allowedHeaders || [];
+
+    // 遍历原始请求头，只复制允许的头
+    for (const [key, value] of request.headers.entries()) {
+      const lowerKey = key.toLowerCase();
+      if (allowedHeaders.includes(lowerKey)) {
+        headers.set(key, value);
+        console.log(`Forwarding header: ${key}: ${value.startsWith('sk-') || value.startsWith('AIza') ? '***' : value}`);
       }
     }
-    return await fetchToken(wwwAuthenticate, scope, authorization);
+
+    if (request.headers.has('user-agent')) {
+      headers.set('User-Agent', request.headers.get('user-agent'));
+      console.log(`Forwarding User-Agent: ${request.headers.get('user-agent')}`);
+    }
+
+    console.log(`Forwarding request to: ${targetUrl}`);
+
+    // 发起实际的 fetch 请求到目标 API
+    const response = await fetch(targetUrl, {
+      method: request.method,
+      headers: headers,
+      body: request.body
+    });
+
+    console.log(`Received response status from ${targetUrl}: ${response.status}`);
+
+    // 创建新的响应头，并添加安全相关的头
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.set('X-Content-Type-Options', 'nosniff');
+    responseHeaders.set('X-Frame-Options', 'DENY');
+    responseHeaders.set('Referrer-Policy', 'no-referrer');
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders
+    });
+
+  } catch (error) {
+    console.error(`Failed to fetch ${targetUrl}:`, error);
+    return new Response('Internal Server Error', { status: 500 });
   }
-  // redirect for DockerHub library images
-  // Example: /v2/busybox/manifests/latest => /v2/library/busybox/manifests/latest
-  if (isDockerHub) {
-    const pathParts = url.pathname.split("/");
-    if (pathParts.length == 5) {
-      pathParts.splice(2, 0, "library");
-      const redirectUrl = new URL(url);
-      redirectUrl.pathname = pathParts.join("/");
-      return Response.redirect(redirectUrl, 301);
+}
+
+function extractPrefixAndRest(pathname, prefixes) {
+  // 添加斜杠前缀以确保正确匹配
+  const normalizedPath = pathname.startsWith('/') ? pathname : `/${pathname}`;
+  
+  for (const prefix of prefixes) {
+    if (normalizedPath.startsWith(prefix)) {
+      const rest = normalizedPath.slice(prefix.length);
+      return [prefix, rest];
     }
   }
-  // foward requests
-  const newUrl = new URL(upstream + url.pathname);
-  const newReq = new Request(newUrl, {
-    method: request.method,
-    headers: request.headers,
-    // don't follow redirect to dockerhub blob upstream
-    redirect: isDockerHub ? "manual" : "follow",
-  });
-  const resp = await fetch(newReq);
-  if (resp.status == 401) {
-    return responseUnauthorized(url);
-  }
-  // handle dockerhub blob redirect manually
-  if (isDockerHub && resp.status == 307) {
-    const location = new URL(resp.headers.get("Location"));
-    const redirectResp = await fetch(location.toString(), {
-      method: "GET",
-      redirect: "follow",
-    });
-    return redirectResp;
-  }
-  return resp;
-}
-
-function parseAuthenticate(authenticateStr) {
-  // sample: Bearer realm="https://auth.ipv6.docker.com/token",service="registry.docker.io"
-  // match strings after =" and before "
-  const re = /(?<=\=")(?:\\.|[^"\\])*(?=")/g;
-  const matches = authenticateStr.match(re);
-  if (matches == null || matches.length < 2) {
-    throw new Error(`invalid Www-Authenticate Header: ${authenticateStr}`);
-  }
-  return {
-    realm: matches[0],
-    service: matches[1],
-  };
-}
-
-async function fetchToken(wwwAuthenticate, scope, authorization) {
-  const url = new URL(wwwAuthenticate.realm);
-  if (wwwAuthenticate.service.length) {
-    url.searchParams.set("service", wwwAuthenticate.service);
-  }
-  if (scope) {
-    url.searchParams.set("scope", scope);
-  }
-  const headers = new Headers();
-  if (authorization) {
-    headers.set("Authorization", authorization);
-  }
-  return await fetch(url, { method: "GET", headers: headers });
-}
-
-function responseUnauthorized(url) {
-  const headers = new Headers();
-  if (MODE == "debug") {
-    headers.set(
-      "Www-Authenticate",
-      `Bearer realm="http://${url.host}/v2/auth",service="cloudflare-docker-proxy"`
-    );
-  } else {
-    headers.set(
-      "Www-Authenticate",
-      `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
-    );
-  }
-  return new Response(JSON.stringify({ message: "UNAUTHORIZED" }), {
-    status: 401,
-    headers: headers,
-  });
+  return [null, null];
 }
