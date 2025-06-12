@@ -134,187 +134,215 @@ addEventListener('fetch', event => {
 });
 
 async function handleRequest(request) {
-  const url = new URL(request.url);
-  const pathname = url.pathname;
-  const search = url.search;
+  try {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+    const search = url.search;
 
-  console.log(`Received request: ${request.method} ${pathname}${search}`);
+    console.log(`Received request: ${request.method} ${pathname}${search}`);
 
-  // 处理根路径和 index.html
-  if (pathname === '/' || pathname === '/index.html') {
-    return new Response('Service is running!', {
-      status: 200,
-      headers: { 'Content-Type': 'text/html; charset=utf-8' }
-    });
-  }
+    // 处理根路径和 index.html
+    if (pathname === '/' || pathname === '/index.html') {
+      return new Response('Service is running!', {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+      });
+    }
 
-  // 处理 robots.txt
-  if (pathname === '/robots.txt') {
-    return new Response('User-agent: *\nDisallow: /', {
-      status: 200,
-      headers: { 'Content-Type': 'text/plain; charset=utf-8' }
-    });
-  }
+    // 处理 robots.txt
+    if (pathname === '/robots.txt') {
+      return new Response('User-agent: *\nDisallow: /', {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+      });
+    }
 
-  // 提取 API 前缀和剩余路径
-  const [prefix, rest] = extractPrefixAndRest(pathname, Object.keys(apiMapping));
-  console.log(`Extracted prefix: ${prefix}, rest: ${rest}`);
+    // 提取 API 前缀和剩余路径
+    const [prefix, rest] = extractPrefixAndRest(pathname, Object.keys(apiMapping));
+    console.log(`Extracted prefix: ${prefix}, rest: ${rest}`);
 
-  // 如果没有匹配的前缀，返回 404
-  if (!prefix) {
-    return new Response(JSON.stringify({ error: 'Not Found' }), {
-      status: 404,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
+    // 如果没有匹配的前缀，返回 404
+    if (!prefix) {
+      return new Response(JSON.stringify({ error: 'Not Found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
 
-  // 如果是 registry 请求，特殊处理
-  if (prefix.startsWith('/registry/')) {
-    // 获取 registry 类型
-    const registryType = prefix.split('/')[2];
-    console.log(`Handling registry request: ${registryType}`);
+    // 如果是 registry 请求，特殊处理
+    if (prefix.startsWith('/registry/')) {
+      // 获取 registry 类型
+      const registryType = prefix.split('/')[2];
+      console.log(`Handling registry request: ${registryType}`);
 
-    // 创建请求头
-    const headers = new Headers();
-    
-    // 转发必要的头
-    ['accept', 'content-type', 'authorization', 'user-agent'].forEach(key => {
-      if (request.headers.has(key.toLowerCase())) {
-        headers.set(key, request.headers.get(key.toLowerCase()));
-      }
-    });
+      // 创建请求头
+      const headers = new Headers();
+      
+      // 转发必要的头
+      ['accept', 'content-type', 'authorization', 'user-agent'].forEach(key => {
+        if (request.headers.has(key.toLowerCase())) {
+          headers.set(key, request.headers.get(key.toLowerCase()));
+        }
+      });
 
-    // 特殊处理 Docker Hub
-    if (registryType === 'docker/hub') {
-      // Docker Hub 需要特殊处理
-      const isDockerHub = true;
-      const authorization = request.headers.get('authorization');
+      // 特殊处理 Docker Hub
+      if (registryType === 'docker/hub') {
+        // Docker Hub 需要特殊处理
+        const isDockerHub = true;
+        const authorization = request.headers.get('authorization');
 
-      // 确保路径以 /v2/ 开头
-      let dockerHubPath = rest;
-      if (!dockerHubPath.startsWith('/v2/')) {
-        dockerHubPath = `/v2/${dockerHubPath}`;
-      }
+        // 确保路径以 /v2/ 开头
+        let dockerHubPath = rest;
+        if (!dockerHubPath.startsWith('/v2/')) {
+          dockerHubPath = `/v2/${dockerHubPath}`;
+        }
 
-      // 处理 DockerHub library 镜像
-      if (isDockerHub) {
-        const pathParts = dockerHubPath.split("/");
-        if (pathParts.length == 6) {  // v2/ + 5个部分
-          if (!pathParts[3].includes("/")) {
-            pathParts.splice(3, 0, "library");
-            dockerHubPath = pathParts.join("/");
+        // 处理 DockerHub library 镜像
+        if (isDockerHub) {
+          const pathParts = dockerHubPath.split("/");
+          if (pathParts.length == 6) {  // v2/ + 5个部分
+            if (!pathParts[3].includes("/")) {
+              pathParts.splice(3, 0, "library");
+              dockerHubPath = pathParts.join("/");
+            }
           }
+        }
+
+        // 添加必要的 Accept 头
+        headers.set('Accept', 'application/vnd.docker.distribution.manifest.v2+json');
+        headers.set('Accept', 'application/vnd.docker.distribution.manifest.list.v2+json');
+        headers.set('Accept', 'application/vnd.docker.distribution.manifest.v1+json');
+
+        // 如果有认证信息
+        if (authorization) {
+          headers.set('Authorization', authorization);
+        }
+
+        // 构建目标 URL
+        const targetUrl = `https://registry-1.docker.io${dockerHubPath}${search}`;
+        console.log(`Docker Hub request: ${targetUrl}`);
+
+        // 处理请求体
+        let body;
+        if (request.body) {
+          body = await request.clone().text();
+        }
+
+        // 发起请求
+        const newReq = new Request(targetUrl, {
+          method: request.method,
+          headers: headers,
+          body: body,
+          redirect: "manual"
+        });
+
+        try {
+          const resp = await fetch(newReq);
+          if (resp.status == 401) {
+            return responseUnauthorized(url);
+          }
+
+          // 处理 blob 重定向
+          if (isDockerHub && resp.status == 307) {
+            const location = new URL(resp.headers.get("Location"));
+            const redirectResp = await fetch(location.toString(), {
+              method: "GET",
+              redirect: "follow"
+            });
+            return redirectResp;
+          }
+
+          // 创建响应
+          const responseHeaders = new Headers();
+          // 保留所有原始响应头
+          for (const [key, value] of resp.headers.entries()) {
+            responseHeaders.set(key, value);
+          }
+
+          // 添加必要的安全头
+          responseHeaders.set('X-Content-Type-Options', 'nosniff');
+          responseHeaders.set('X-Frame-Options', 'DENY');
+          responseHeaders.set('Referrer-Policy', 'no-referrer');
+
+          return new Response(resp.body, {
+            status: resp.status,
+            statusText: resp.statusText,
+            headers: responseHeaders
+          });
+        } catch (error) {
+          console.error(`Failed to fetch Docker Hub request:`, error);
+          return new Response('Internal Server Error', { status: 500 });
         }
       }
 
-      // 添加必要的 Accept 头
-      headers.set('Accept', 'application/vnd.docker.distribution.manifest.v2+json');
-      headers.set('Accept', 'application/vnd.docker.distribution.manifest.list.v2+json');
-      headers.set('Accept', 'application/vnd.docker.distribution.manifest.v1+json');
+      // 其他 registry 直接转发
+      const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+      console.log(`Target URL: ${targetUrl}`);
 
-      // 如果有认证信息
-      if (authorization) {
-        headers.set('Authorization', authorization);
+      // 发起请求
+      const response = await fetch(targetUrl, {
+        method: request.method,
+        headers: headers,
+        body: request.body
+      });
+
+      // 创建响应
+      const responseHeaders = new Headers();
+      // 保留所有原始响应头
+      for (const [key, value] of response.headers.entries()) {
+        responseHeaders.set(key, value);
+      }
+
+      // 添加必要的安全头
+      responseHeaders.set('X-Content-Type-Options', 'nosniff');
+      responseHeaders.set('X-Frame-Options', 'DENY');
+      responseHeaders.set('Referrer-Policy', 'no-referrer');
+
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders
+      });
+    } else {
+      // 获取当前 API 的允许头配置
+      const config = apiMapping[prefix];
+      const allowedHeaders = config.allowedHeaders || [];
+
+      // 遍历原始请求头，只复制允许的头
+      const headers = new Headers();
+      for (const [key, value] of request.headers.entries()) {
+        const lowerKey = key.toLowerCase();
+        if (allowedHeaders.includes(lowerKey)) {
+          headers.set(key, value);
+          console.log(`Forwarding header: ${key}: ${value.startsWith('sk-') || value.startsWith('AIza') ? '***' : value}`);
+        }
       }
 
       // 构建目标 URL
-      const targetUrl = `https://registry-1.docker.io${dockerHubPath}${search}`;
-      console.log(`Docker Hub request: ${targetUrl}`);
-
-      // 处理请求体
-      let body;
-      if (request.body) {
-        body = await request.clone().text();
-      }
+      const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+      console.log(`Target URL: ${targetUrl}`);
 
       // 发起请求
-      const newReq = new Request(targetUrl, {
+      const response = await fetch(targetUrl, {
         method: request.method,
         headers: headers,
-        body: body,
-        redirect: "manual"
+        body: request.body
       });
 
-      try {
-        const resp = await fetch(newReq);
-        if (resp.status == 401) {
-          return responseUnauthorized(url);
-        }
+      // 创建响应
+      const responseHeaders = new Headers(response.headers);
+      responseHeaders.set('X-Content-Type-Options', 'nosniff');
+      responseHeaders.set('X-Frame-Options', 'DENY');
+      responseHeaders.set('Referrer-Policy', 'no-referrer');
 
-        // 处理 blob 重定向
-        if (isDockerHub && resp.status == 307) {
-          const location = new URL(resp.headers.get("Location"));
-          const redirectResp = await fetch(location.toString(), {
-            method: "GET",
-            redirect: "follow"
-          });
-          return redirectResp;
-        }
-
-        // 创建响应
-        const responseHeaders = new Headers();
-        // 保留所有原始响应头
-        for (const [key, value] of resp.headers.entries()) {
-          responseHeaders.set(key, value);
-        }
-
-        // 添加必要的安全头
-        responseHeaders.set('X-Content-Type-Options', 'nosniff');
-        responseHeaders.set('X-Frame-Options', 'DENY');
-        responseHeaders.set('Referrer-Policy', 'no-referrer');
-
-        return new Response(resp.body, {
-          status: resp.status,
-          statusText: resp.statusText,
-          headers: responseHeaders
-        });
-      } catch (error) {
-        console.error(`Failed to fetch Docker Hub request:`, error);
-        return new Response('Internal Server Error', { status: 500 });
-      }
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders
+      });
     }
-
-    // 其他 registry 直接转发
-    const targetUrl = `${apiMapping[prefix].baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
-    console.log(`Target URL: ${targetUrl}`);
-
-    // 发起请求
-    // 获取当前 API 的允许头配置
-    const config = apiMapping[prefix];
-    const allowedHeaders = config.allowedHeaders || [];
-
-    // 遍历原始请求头，只复制允许的头
-    for (const [key, value] of request.headers.entries()) {
-      const lowerKey = key.toLowerCase();
-      if (allowedHeaders.includes(lowerKey)) {
-        headers.set(key, value);
-        console.log(`Forwarding header: ${key}: ${value.startsWith('sk-') || value.startsWith('AIza') ? '***' : value}`);
-      }
-    }
-
-    console.log(`Forwarding request to: ${targetUrl}`);
-
-    // 发起实际的 fetch 请求到目标 API
-    const response = await fetch(targetUrl, {
-      method: request.method,
-      headers: headers,
-      body: request.body
-    });
-
-    // 创建响应
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.set('X-Content-Type-Options', 'nosniff');
-    responseHeaders.set('X-Frame-Options', 'DENY');
-    responseHeaders.set('Referrer-Policy', 'no-referrer');
-
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: responseHeaders
-    });
-
   } catch (error) {
-    console.error(`Failed to fetch ${targetUrl}:`, error);
+    console.error(`Failed to handle request:`, error);
     return new Response('Internal Server Error', { status: 500 });
   }
 }
