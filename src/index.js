@@ -197,43 +197,100 @@ async function handleRequest(request) {
       // 特殊处理 Docker Hub
       if (registryType === 'docker/hub') {
         // Docker Hub 需要特殊处理
-        // 1. 处理认证
+        const isDockerHub = true;
         const authorization = request.headers.get('authorization');
-        if (authorization) {
-          headers.set('authorization', authorization);
+
+        // 处理 /v2/ 路径
+        if (rest === '/v2/') {
+          const newUrl = new URL('https://registry-1.docker.io/v2/');
+          if (authorization) {
+            headers.set("Authorization", authorization);
+          }
+          const resp = await fetch(newUrl.toString(), {
+            method: "GET",
+            headers: headers,
+            redirect: "follow"
+          });
+          if (resp.status === 401) {
+            return responseUnauthorized(url);
+          }
+          return resp;
         }
 
-        // 2. 处理路径
-        // Docker Hub 需要添加 /v2/ 前缀
-        let dockerHubPath = rest;
-        if (!dockerHubPath.startsWith('/v2/')) {
-          dockerHubPath = `/v2/${dockerHubPath}`;
+        // 处理认证
+        if (rest === '/v2/auth') {
+          const newUrl = new URL('https://registry-1.docker.io/v2/');
+          const resp = await fetch(newUrl.toString(), {
+            method: "GET",
+            redirect: "follow"
+          });
+          if (resp.status !== 401) {
+            return resp;
+          }
+          const authenticateStr = resp.headers.get("WWW-Authenticate");
+          if (authenticateStr === null) {
+            return resp;
+          }
+          const wwwAuthenticate = parseAuthenticate(authenticateStr);
+          let scope = url.searchParams.get("scope");
+          
+          // 处理 DockerHub library 镜像
+          if (scope && isDockerHub) {
+            let scopeParts = scope.split(":");
+            if (scopeParts.length == 3 && !scopeParts[1].includes("/")) {
+              scopeParts[1] = "library/" + scopeParts[1];
+              scope = scopeParts.join(":");
+            }
+          }
+          return await fetchToken(wwwAuthenticate, scope, authorization);
         }
 
-        const dockerHubUrl = `https://registry-1.docker.io${dockerHubPath}${search}`;
-        console.log(`Docker Hub request: ${dockerHubUrl}`);
-        
-        // 3. 添加必要的头
-        headers.set('Accept', 'application/vnd.docker.distribution.manifest.v2+json');
-        headers.set('Accept', 'application/vnd.docker.distribution.manifest.list.v2+json');
-        headers.set('Accept', 'application/vnd.docker.distribution.manifest.v1+json');
+        // 处理 DockerHub library 镜像路径
+        if (isDockerHub) {
+          const pathParts = rest.split("/");
+          if (pathParts.length == 5) {
+            pathParts.splice(2, 0, "library");
+            const redirectUrl = new URL(url);
+            redirectUrl.pathname = pathParts.join("/");
+            return Response.redirect(redirectUrl, 301);
+          }
+        }
+
+        // 构建目标 URL
+        const targetUrl = `https://registry-1.docker.io${rest}${search}`;
+        console.log(`Docker Hub request: ${targetUrl}`);
 
         // 发起请求
-        const response = await fetch(dockerHubUrl, {
+        const newReq = new Request(targetUrl, {
           method: request.method,
           headers: headers,
-          body: request.body
+          redirect: "manual"
         });
 
+        const resp = await fetch(newReq);
+        if (resp.status == 401) {
+          return responseUnauthorized(url);
+        }
+
+        // 处理 blob 重定向
+        if (isDockerHub && resp.status == 307) {
+          const location = new URL(resp.headers.get("Location"));
+          const redirectResp = await fetch(location.toString(), {
+            method: "GET",
+            redirect: "follow"
+          });
+          return redirectResp;
+        }
+
         // 创建响应
-        const responseHeaders = new Headers(response.headers);
+        const responseHeaders = new Headers(resp.headers);
         responseHeaders.set('X-Content-Type-Options', 'nosniff');
         responseHeaders.set('X-Frame-Options', 'DENY');
         responseHeaders.set('Referrer-Policy', 'no-referrer');
 
-        return new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
+        return new Response(resp.body, {
+          status: resp.status,
+          statusText: resp.statusText,
           headers: responseHeaders
         });
       }
