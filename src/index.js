@@ -79,16 +79,32 @@ async function handleApiRequest(request) {
       // Extract registry prefix from the v2Path
       const [registryPrefix, imagePath] = extractPrefixAndRest(v2Path, Object.keys(registryConfigs));
 
+      let targetBaseUrl;
+      let finalImagePath;
+
       if (registryPrefix) {
         const config = registryConfigs[registryPrefix];
-        // Pass the imagePath (which is the part after our proxy prefix) for scope inference
-        return handleRegistryRequest(request, config.baseUrl, imagePath, search, imagePath);
+        targetBaseUrl = config.baseUrl;
+        finalImagePath = imagePath; // This is the part after our proxy prefix, e.g., "/hello-world"
       } else {
         // No specific registry prefix found, default to Docker Hub
-        // This handles `docker pull myproxy.com/hello-world`
-        // Pass the full v2Path for scope inference as it represents the image path for Docker Hub
-        return handleRegistryRequest(request, DOCKER_HUB_URL, v2Path, search, v2Path);
+        targetBaseUrl = DOCKER_HUB_URL;
+        finalImagePath = v2Path; // This is the full path after /v2/, e.g., "hello-world" or "library/ubuntu"
       }
+
+      // Special handling for Docker Hub official images (e.g., "hello-world" -> "library/hello-world")
+      if (targetBaseUrl === DOCKER_HUB_URL) {
+          let repoName = finalImagePath.split('/manifests/')[0].split('/blobs/')[0];
+          // Only add 'library/' if it's a single-segment name and not already a multi-segment path or a digest
+          if (repoName && !repoName.includes('/') && !repoName.includes(':')) {
+              finalImagePath = `library/${finalImagePath}`;
+          }
+      }
+      
+      // Ensure finalImagePath does not start with a leading slash if it's being appended directly to /v2/
+      const cleanedFinalImagePath = finalImagePath.startsWith('/') ? finalImagePath.slice(1) : finalImagePath;
+
+      return handleRegistryRequest(request, targetBaseUrl, cleanedFinalImagePath, search, cleanedFinalImagePath);
     }
 
     // Handle other API requests (e.g., AI APIs)
