@@ -70,7 +70,8 @@ async function handleApiRequest(request) {
         const targetUrl = `${DOCKER_HUB_URL}/v2/`;
         const pingResponse = await fetch(targetUrl, { method: request.method, headers: request.headers, redirect: 'manual' });
         if (pingResponse.status === 401) {
-          return responseUnauthorized(new URL(request.url), pingResponse.headers.get('Www-Authenticate'));
+          // For a generic /v2/ ping, no specific image path is available for scope inference
+          return responseUnauthorized(new URL(request.url), pingResponse.headers.get('Www-Authenticate'), null);
         }
         return pingResponse;
       }
@@ -80,11 +81,13 @@ async function handleApiRequest(request) {
 
       if (registryPrefix) {
         const config = registryConfigs[registryPrefix];
-        return handleRegistryRequest(request, config.baseUrl, imagePath, search);
+        // Pass the imagePath (which is the part after our proxy prefix) for scope inference
+        return handleRegistryRequest(request, config.baseUrl, imagePath, search, imagePath);
       } else {
         // No specific registry prefix found, default to Docker Hub
         // This handles `docker pull myproxy.com/hello-world`
-        return handleRegistryRequest(request, DOCKER_HUB_URL, v2Path, search);
+        // Pass the full v2Path for scope inference as it represents the image path for Docker Hub
+        return handleRegistryRequest(request, DOCKER_HUB_URL, v2Path, search, v2Path);
       }
     }
 
@@ -129,7 +132,8 @@ async function handleRegistryRequest(request, baseUrl, imagePath, search) {
 
   // Handle Docker Hub's 401 Unauthorized with a challenge
   if (response.status === 401) {
-    return responseUnauthorized(new URL(request.url), response.headers.get('Www-Authenticate'));
+    // Pass the imagePath (which is the part after our proxy prefix) for scope inference
+    return responseUnauthorized(new URL(request.url), response.headers.get('Www-Authenticate'), imagePath);
   }
 
   // Handle blob redirects (e.g., 307 Temporary Redirect)
@@ -231,27 +235,63 @@ function addSecurityHeaders(headers) {
  * @param {string|null} authHeader - The original WWW-Authenticate header from the upstream.
  * @returns {Response} - The 401 response.
  */
-function responseUnauthorized(url, authHeader) {
+/**
+ * Creates a 401 Unauthorized response with a WWW-Authenticate header.
+ * @param {URL} url - The original request URL.
+ * @param {string|null} authHeader - The original WWW-Authenticate header from the upstream.
+ * @param {string|null} requestedImagePath - The image path requested by the client (e.g., "hello-world/manifests/latest").
+ * @returns {Response} - The 401 response.
+ */
+/**
+ * Creates a 401 Unauthorized response with a WWW-Authenticate header.
+ * @param {URL} url - The original request URL.
+ * @param {string|null} authHeader - The original WWW-Authenticate header from the upstream.
+ * @param {string|null} requestedImagePath - The image path requested by the client (e.g., "hello-world/manifests/latest").
+ * @returns {Response} - The 401 response.
+ */
+function responseUnauthorized(url, authHeader, requestedImagePath = null) {
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');
 
     const newRealm = `https://${url.hostname}/v2/token`;
     let service = 'registry.docker.io';
-    let scope = 'repository:*:pull'; // Default generic scope for initial ping or if not provided
+    let scope = 'repository:*:pull'; // Default generic scope
+    const otherParams = [];
 
     if (authHeader) {
-        const serviceMatch = authHeader.match(/service="([^"]+)"/);
-        const scopeMatch = authHeader.match(/scope="([^"]+)"/);
-
-        if (serviceMatch) {
-            service = serviceMatch[1];
+        // Parse the existing WWW-Authenticate header
+        const parts = authHeader.split(',');
+        for (const part of parts) {
+            const trimmedPart = part.trim();
+            if (trimmedPart.startsWith('realm="')) {
+                // Ignore original realm, we'll use newRealm
+            } else if (trimmedPart.startsWith('service="')) {
+                service = trimmedPart.substring('service="'.length, trimmedPart.length - 1);
+            } else if (trimmedPart.startsWith('scope="')) {
+                scope = trimmedPart.substring('scope="'.length, trimmedPart.length - 1);
+            } else {
+                // Collect other parameters
+                otherParams.push(trimmedPart);
+            }
         }
-        if (scopeMatch) {
-            scope = scopeMatch[1]; // Use upstream scope if available
+    }
+
+    // If scope was not provided by upstream or is generic, but we have image path, try to infer
+    if ((!authHeader || !authHeader.includes('scope=') || scope === 'repository:*:pull') && requestedImagePath) {
+        let repoName = requestedImagePath.split('/manifests/')[0].split('/blobs/')[0];
+        // For Docker Hub, if it's a single-segment name, it implies 'library/'
+        if (service === 'registry.docker.io' && repoName && !repoName.includes('/') && !repoName.includes(':')) {
+            repoName = `library/${repoName}`;
+        }
+        if (repoName) {
+            scope = `repository:${repoName}:pull`;
         }
     }
     
-    const newAuthHeader = `Bearer realm="${newRealm}",service="${service}",scope="${scope}"`;
+    let newAuthHeader = `Bearer realm="${newRealm}",service="${service}",scope="${scope}"`;
+    if (otherParams.length > 0) {
+        newAuthHeader += `,${otherParams.join(',')}`;
+    }
     headers.set('WWW-Authenticate', newAuthHeader);
 
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -268,7 +308,11 @@ async function handleTokenRequest(request) {
     const scope = searchParams.get('scope');
 
     // The actual token server is at auth.docker.io
-    const tokenUrl = `https://auth.docker.io/token?service=${service}&scope=${scope}`;
+    // The actual token server is at auth.docker.io
+    // URL-encode service and scope parameters
+    const encodedService = encodeURIComponent(service);
+    const encodedScope = encodeURIComponent(scope);
+    const tokenUrl = `https://auth.docker.io/token?service=${encodedService}&scope=${encodedScope}`;
     
     console.log(`Requesting token from: ${tokenUrl}`);
 
