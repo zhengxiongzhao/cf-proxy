@@ -38,16 +38,16 @@ addEventListener('fetch', event => {
 });
 
 /**
- * Main request handler
+ * Handles all API requests except the token endpoint
  * @param {Request} request - The incoming request
  * @returns {Promise<Response>} - The response
  */
-async function handleRequest(request) {
+async function handleApiRequest(request) {
   try {
     const url = new URL(request.url);
     const { pathname, search } = url;
 
-    console.log(`Received request: ${request.method} ${pathname}${search}`);
+    console.log(`Received API request: ${request.method} ${pathname}${search}`);
 
     // Handle static assets and root path
     if (pathname === '/' || pathname === '/index.html') {
@@ -59,6 +59,16 @@ async function handleRequest(request) {
 
     // Check if it's a Docker V2 API request
     if (pathname.startsWith('/v2/')) {
+      // The token endpoint is handled separately
+      if (pathname === '/v2/' || pathname === '/v2') {
+        // Handle the Docker V2 API "ping"
+        const targetUrl = `${DOCKER_HUB_URL}/v2/`;
+        const pingResponse = await fetch(targetUrl, { method: request.method, headers: request.headers, redirect: 'manual' });
+        if (pingResponse.status === 401) {
+          return responseUnauthorized(new URL(request.url), pingResponse.headers.get('Www-Authenticate'));
+        }
+        return pingResponse;
+      }
       return handleRegistryRequest(request, pathname, search);
     }
 
@@ -66,7 +76,7 @@ async function handleRequest(request) {
     return handleGenericApiRequest(request, pathname, search);
 
   } catch (error) {
-    console.error(`Critical error in handleRequest:`, error);
+    console.error(`Critical error in handleApiRequest:`, error);
     return new Response('Internal Server Error', { status: 500 });
   }
 }
@@ -295,12 +305,21 @@ async function handleTokenRequest(request) {
     return tokenResponse;
 }
 
-// We need to modify the main handler to include the token endpoint
-const originalHandler = handleRequest;
+/**
+ * Main request handler, acts as a router.
+ * @param {Request} request - The incoming request
+ * @returns {Promise<Response>} - The response
+ */
 async function handleRequest(request) {
+  try {
     const url = new URL(request.url);
     if (url.pathname === '/v2/token') {
-        return handleTokenRequest(request);
+      return handleTokenRequest(request);
     }
-    return originalHandler(request);
+    // All other requests go to the main API handler
+    return handleApiRequest(request);
+  } catch (error) {
+    console.error(`Critical error in router handleRequest:`, error);
+    return new Response('Internal Server Error', { status: 500 });
+  }
 }
