@@ -134,8 +134,8 @@ async function handleRegistryRequest(request, baseUrl, imagePath, search) {
 
   // Handle Docker Hub's 401 Unauthorized with a challenge
   if (response.status === 401) {
-    // Pass the imagePath (which is the part after our proxy prefix) for scope inference
-    return responseUnauthorized(new URL(request.url), response.headers.get('Www-Authenticate'), imagePath);
+    // Pass the cleanedImagePath (which is the part after our proxy prefix, without leading slash) for scope inference
+    return responseUnauthorized(new URL(request.url), response.headers.get('Www-Authenticate'), cleanedImagePath);
   }
 
   // Handle blob redirects (e.g., 307 Temporary Redirect)
