@@ -116,7 +116,9 @@ async function handleApiRequest(request) {
  * @returns {Promise<Response>} - The response
  */
 async function handleRegistryRequest(request, baseUrl, imagePath, search) {
-  const targetUrl = `${baseUrl}/v2/${imagePath}${search}`;
+  // Ensure imagePath does not start with a leading slash if it's being appended directly to /v2/
+  const cleanedImagePath = imagePath.startsWith('/') ? imagePath.slice(1) : imagePath;
+  const targetUrl = `${baseUrl}/v2/${cleanedImagePath}${search}`;
   const isDockerHub = (baseUrl === DOCKER_HUB_URL);
   console.log(`Proxying registry request to: ${targetUrl}`);
 
