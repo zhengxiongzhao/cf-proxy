@@ -4,17 +4,21 @@ const DOCKER_HUB_URL = 'https://registry-1.docker.io';
 // Default headers to forward
 const DEFAULT_HEADERS = ['accept', 'content-type', 'authorization', 'user-agent'];
 
-// API configurations
-const apiConfigs = {
-  '/registry/docker/elastic': { baseUrl: 'https://docker.elastic.co' },
-  '/registry/docker/hub': { baseUrl: DOCKER_HUB_URL },
-  '/registry/google': { baseUrl: 'https://gcr.io' },
-  '/registry/github': { baseUrl: 'https://ghcr.io' },
-  '/registry/k8s': { baseUrl: 'https://registry.k8s.io' },
-  '/registry/microsoft': { baseUrl: 'https://mcr.microsoft.com' },
-  '/registry/nvidia': { baseUrl: 'https://nvcr.io' },
-  '/registry/quay': { baseUrl: 'https://quay.io' },
-  '/registry/ollama': { baseUrl: 'https://registry.ollama.ai' },
+// Registry API configurations (keys are path segments after /v2/)
+const registryConfigs = {
+  'register/docker/elastic': { baseUrl: 'https://docker.elastic.co' },
+  'register/docker/hub': { baseUrl: DOCKER_HUB_URL },
+  'register/google': { baseUrl: 'https://gcr.io' },
+  'register/github': { baseUrl: 'https://ghcr.io' },
+  'register/k8s': { baseUrl: 'https://registry.k8s.io' },
+  'register/microsoft': { baseUrl: 'https://mcr.microsoft.com' },
+  'register/nvidia': { baseUrl: 'https://nvcr.io' },
+  'register/quay': { baseUrl: 'https://quay.io' },
+  'register/ollama': { baseUrl: 'https://registry.ollama.ai' }
+};
+
+// AI API configurations (keys include leading slash)
+const aiConfigs = {
   '/ai/discord': { baseUrl: 'https://discord.com/api' },
   '/ai/telegram': { baseUrl: 'https://api.telegram.org' },
   '/ai/openai': { baseUrl: 'https://api.openai.com' },
@@ -59,9 +63,10 @@ async function handleApiRequest(request) {
 
     // Check if it's a Docker V2 API request
     if (pathname.startsWith('/v2/')) {
-      // The token endpoint is handled separately
-      if (pathname === '/v2/' || pathname === '/v2') {
-        // Handle the Docker V2 API "ping"
+      const v2Path = pathname.substring(4); // Remove '/v2/'
+      
+      // Handle the Docker V2 API "ping"
+      if (v2Path === '' || v2Path === '/') {
         const targetUrl = `${DOCKER_HUB_URL}/v2/`;
         const pingResponse = await fetch(targetUrl, { method: request.method, headers: request.headers, redirect: 'manual' });
         if (pingResponse.status === 401) {
@@ -69,11 +74,29 @@ async function handleApiRequest(request) {
         }
         return pingResponse;
       }
-      return handleRegistryRequest(request, pathname, search);
+
+      // Extract registry prefix from the v2Path
+      const [registryPrefix, imagePath] = extractPrefixAndRest(v2Path, Object.keys(registryConfigs));
+
+      if (registryPrefix) {
+        const config = registryConfigs[registryPrefix];
+        return handleRegistryRequest(request, config.baseUrl, imagePath, search);
+      } else {
+        // No specific registry prefix found, default to Docker Hub
+        // This handles `docker pull myproxy.com/hello-world`
+        return handleRegistryRequest(request, DOCKER_HUB_URL, v2Path, search);
+      }
     }
 
     // Handle other API requests (e.g., AI APIs)
-    return handleGenericApiRequest(request, pathname, search);
+    const [aiPrefix, restPath] = extractPrefixAndRest(pathname, Object.keys(aiConfigs));
+    if (aiPrefix) {
+      const config = aiConfigs[aiPrefix];
+      return handleGenericApiRequest(request, config.baseUrl, restPath, search, config.allowedHeaders);
+    } else {
+      // No matching API or /v2/ path
+      return new Response(JSON.stringify({ error: 'Not Found' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
 
   } catch (error) {
     console.error(`Critical error in handleApiRequest:`, error);
@@ -84,47 +107,15 @@ async function handleApiRequest(request) {
 /**
  * Handles Docker Registry API requests
  * @param {Request} request - The incoming request
- * @param {string} pathname - The request pathname
- * @param {string} search - The request search query
+ * @param {string} baseUrl - The base URL of the target registry.
+ * @param {string} imagePath - The path segment representing the image name.
+ * @param {string} search - The request search query.
  * @returns {Promise<Response>} - The response
  */
-async function handleRegistryRequest(request, pathname, search) {
-  // The path inside the v2 API
-  const v2Path = pathname.substring(4); // Remove '/v2/'
-
-  // Handle the Docker V2 API "ping"
-  if (v2Path === '' || v2Path === '/') {
-    // A GET to /v2/ should be proxied to a default registry to check for auth
-    // We default to Docker Hub
-    const targetUrl = `${DOCKER_HUB_URL}/v2/`;
-    const pingResponse = await fetch(targetUrl, { method: request.method, headers: request.headers, redirect: 'manual' });
-    if (pingResponse.status === 401) {
-      return responseUnauthorized(new URL(request.url));
-    }
-    return pingResponse;
-  }
-
-  // Extract prefix and the rest of the image path
-  const [prefix, imagePath] = extractPrefixAndRest(v2Path, Object.keys(apiConfigs));
-  
-  let targetUrl;
-  let isDockerHub = false;
-
-  if (prefix && prefix.startsWith('/registry/')) {
-    // A known registry is specified
-    const config = apiConfigs[prefix];
-    targetUrl = `${config.baseUrl}/v2${imagePath.startsWith('/') ? imagePath : `/${imagePath}`}${search}`;
-    if (config.baseUrl === DOCKER_HUB_URL) {
-      isDockerHub = true;
-    }
-    console.log(`Proxying to configured registry: ${prefix} -> ${targetUrl}`);
-  } else {
-    // No specific registry prefix found, default to Docker Hub
-    // This handles `docker pull myproxy.com/hello-world`
-    isDockerHub = true;
-    targetUrl = `${DOCKER_HUB_URL}/v2/${v2Path}${search}`;
-    console.log(`Defaulting to Docker Hub: ${targetUrl}`);
-  }
+async function handleRegistryRequest(request, baseUrl, imagePath, search) {
+  const targetUrl = `${baseUrl}/v2/${imagePath}${search}`;
+  const isDockerHub = (baseUrl === DOCKER_HUB_URL);
+  console.log(`Proxying registry request to: ${targetUrl}`);
 
   // Forward the request
   const newReq = new Request(targetUrl, {
@@ -164,28 +155,23 @@ async function handleRegistryRequest(request, pathname, search) {
 /**
  * Handles generic API requests (non-registry)
  * @param {Request} request - The incoming request
- * @param {string} pathname - The request pathname
- * @param {string} search - The request search query
+ * @param {string} baseUrl - The base URL of the target API.
+ * @param {string} restPath - The remaining path after the proxy prefix.
+ * @param {string} search - The request search query.
+ * @param {string[]} [allowedHeaders=[]] - Additional headers allowed for this API.
  * @returns {Promise<Response>} - The response
  */
-async function handleGenericApiRequest(request, pathname, search) {
-  const [prefix, rest] = extractPrefixAndRest(pathname, Object.keys(apiConfigs));
-
-  if (!prefix) {
-    return new Response(JSON.stringify({ error: 'Not Found' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  const config = apiConfigs[prefix];
-  const allowedHeaders = [...DEFAULT_HEADERS, ...(config.allowedHeaders || [])];
-
+async function handleGenericApiRequest(request, baseUrl, restPath, search, allowedHeaders = []) {
   const headers = new Headers();
+  const combinedAllowedHeaders = [...DEFAULT_HEADERS, ...allowedHeaders];
+
   for (const [key, value] of request.headers.entries()) {
-    if (allowedHeaders.includes(key.toLowerCase())) {
+    if (combinedAllowedHeaders.includes(key.toLowerCase())) {
       headers.set(key, value);
     }
   }
 
-  const targetUrl = `${config.baseUrl}${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+  const targetUrl = `${baseUrl}${restPath.startsWith('/') ? restPath : `/${restPath}`}${search}`;
   console.log(`Proxying generic API request to: ${targetUrl}`);
 
   const response = await fetch(targetUrl, {
@@ -205,17 +191,16 @@ async function handleGenericApiRequest(request, pathname, search) {
 
 /**
  * Extracts the matching prefix and the rest of the path.
- * @param {string} pathname - The URL pathname.
+ * Assumes pathSegment is already correctly formatted relative to prefixes.
+ * @param {string} pathSegment - The path segment to parse.
  * @param {string[]} prefixes - The list of prefixes to check.
  * @returns {[string|null, string|null]} - The matching prefix and the rest of the path.
  */
-function extractPrefixAndRest(pathname, prefixes) {
-  const normalizedPath = pathname.startsWith('/') ? pathname : `/${pathname}`;
-  
-  // Find the longest matching prefix
+function extractPrefixAndRest(pathSegment, prefixes) {
   let bestMatch = null;
   for (const prefix of prefixes) {
-    if (normalizedPath.startsWith(prefix + '/')) {
+    // Ensure we match a full segment, e.g., "docker/hub/foo" should match "docker/hub"
+    if (pathSegment.startsWith(prefix + '/') || pathSegment === prefix) {
         if (!bestMatch || prefix.length > bestMatch.length) {
             bestMatch = prefix;
         }
@@ -223,11 +208,11 @@ function extractPrefixAndRest(pathname, prefixes) {
   }
 
   if (bestMatch) {
-      const rest = normalizedPath.slice(bestMatch.length);
+      const rest = pathSegment.slice(bestMatch.length);
       return [bestMatch, rest];
   }
 
-  return [null, pathname]; // Return the original path if no prefix matches
+  return [null, pathSegment]; // Return the original path if no prefix matches
 }
 
 /**
@@ -247,38 +232,31 @@ function addSecurityHeaders(headers) {
  * @returns {Response} - The 401 response.
  */
 function responseUnauthorized(url, authHeader) {
-    // If the upstream provided a WWW-Authenticate header, use it.
-    if (authHeader) {
-        // We need to rewrite the 'realm' to point back to our proxy.
-        const realmRegex = /realm="([^"]+)"/;
-        const serviceRegex = /service="([^"]+)"/;
-        
-        const realmMatch = authHeader.match(realmRegex);
-        const serviceMatch = authHeader.match(serviceRegex);
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
 
-        if (realmMatch && serviceMatch) {
-            const service = serviceMatch[1];
-            // The realm for token authentication should be the token endpoint.
-            const newRealm = `https://${url.hostname}/v2/token`;
-            const newAuthHeader = `Bearer realm="${newRealm}",service="${service}"`;
-            
-            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-                status: 401,
-                headers: {
-                    'Www-Authenticate': newAuthHeader,
-                    'Content-Type': 'application/json'
-                }
-            });
+    const newRealm = `https://${url.hostname}/v2/token`;
+    let service = 'registry.docker.io';
+    let scope = 'repository:*:pull'; // Default generic scope for initial ping or if not provided
+
+    if (authHeader) {
+        const serviceMatch = authHeader.match(/service="([^"]+)"/);
+        const scopeMatch = authHeader.match(/scope="([^"]+)"/);
+
+        if (serviceMatch) {
+            service = serviceMatch[1];
+        }
+        if (scopeMatch) {
+            scope = scopeMatch[1]; // Use upstream scope if available
         }
     }
+    
+    const newAuthHeader = `Bearer realm="${newRealm}",service="${service}",scope="${scope}"`;
+    headers.set('WWW-Authenticate', newAuthHeader);
 
-    // Fallback for basic ping 401
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401,
-        headers: {
-            'Www-Authenticate': `Bearer realm="https://${url.hostname}/v2/token",service="registry.docker.io"`,
-            'Content-Type': 'application/json'
-        }
+        headers: headers
     });
 }
 
@@ -294,11 +272,10 @@ async function handleTokenRequest(request) {
     
     console.log(`Requesting token from: ${tokenUrl}`);
 
-    // If the client sends basic auth, we need to forward it.
-    const headers = {};
-    if (request.headers.has('authorization')) {
-        headers['authorization'] = request.headers.get('authorization');
-    }
+    // Forward all original request headers to the token server
+    const headers = new Headers(request.headers);
+    // Remove host header as it will be set by fetch to auth.docker.io
+    headers.delete('host'); 
 
     const tokenResponse = await fetch(tokenUrl, { headers });
     
